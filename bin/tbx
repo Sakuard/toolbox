@@ -1,0 +1,128 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+SOURCE="${BASH_SOURCE[0]}"
+
+while [ -L "$SOURCE" ]; do
+  DIR="$(cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+
+  if [[ "$SOURCE" != /* ]]; then
+    SOURCE="$DIR/$SOURCE"
+  fi
+done
+
+SCRIPT_DIR="$(cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd)"
+ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+COMMANDS_DIR="$ROOT_DIR/commands"
+
+die() {
+  echo "tbx: $*" >&2
+  exit 1
+}
+
+require_command() {
+  command -v "$1" >/dev/null 2>&1 || die "required command not found: $1"
+}
+
+open_palette() {
+  local dir="$1"
+  local prompt="${2:-tbx}"
+  local selection
+  local type
+  local path
+
+  require_command fzf
+
+  selection="$(
+    {
+      # directories first
+      for item in "$dir"/*; do
+        [[ -d "$item" ]] || continue
+
+        name="$(basename "$item")"
+
+        printf '%s\t%s\t%s\n' \
+          "$name" \
+          "group" \
+          "$item"
+      done
+
+      # executable commands
+      for item in "$dir"/*; do
+        [[ -f "$item" && -x "$item" ]] || continue
+
+        name="$(basename "$item")"
+
+        desc="$(
+          sed -n 's/^# @desc[[:space:]]*//p' "$item" |
+            head -n 1
+        )"
+
+        printf '%s\t%s\t%s\n' \
+          "$name" \
+          "$desc" \
+          "$item"
+      done
+    } |
+      fzf \
+        --delimiter=$'\t' \
+        --with-nth=1,2 \
+        --prompt="$prompt > " \
+        --height=60% \
+        --layout=reverse \
+        --border
+  )"
+
+  [[ -n "$selection" ]] || exit 0
+
+  type="$(printf '%s\n' "$selection" | awk -F $'\t' '{ print $2 }')"
+  path="$(printf '%s\n' "$selection" | awk -F $'\t' '{ print $3 }')"
+
+  if [[ "$type" == "group" ]]; then
+    open_palette "$path" "$(basename "$path")"
+  else
+    exec "$path"
+  fi
+}
+
+run_command() {
+  local args=("$@")
+  local count="${#args[@]}"
+  local i
+  local relative
+  local command_path
+
+  for ((i=count; i>=1; i--)); do
+    relative="$(
+      IFS=/
+      echo "${args[*]:0:i}"
+    )"
+
+    command_path="$COMMANDS_DIR/$relative"
+
+    if [[ -f "$command_path" && -x "$command_path" ]]; then
+      exec "$command_path" "${args[@]:i}"
+    fi
+  done
+
+  # tbx kube → open kube palette
+  command_path="$COMMANDS_DIR/$1"
+
+  if [[ $# -eq 1 && -d "$command_path" ]]; then
+    open_palette "$command_path" "$1"
+    exit 0
+  fi
+
+  die "command not found: $*"
+}
+
+[[ -d "$COMMANDS_DIR" ]] ||
+  die "commands directory not found: $COMMANDS_DIR"
+
+if [[ $# -eq 0 ]]; then
+  open_palette "$COMMANDS_DIR" "tbx"
+else
+  run_command "$@"
+fi

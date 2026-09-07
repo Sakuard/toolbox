@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+
+# @name kube ctx
+# @desc Switch Kubernetes context
+
+set -euo pipefail
+
+command -v kubectl >/dev/null 2>&1 || {
+  echo "kubectl not found" >&2
+  exit 1
+}
+
+command -v fzf >/dev/null 2>&1 || {
+  echo "fzf not found" >&2
+  exit 1
+}
+
+current_context="$(
+  kubectl config current-context 2>/dev/null || true
+)"
+
+context="$(
+  kubectl config get-contexts -o name |
+    fzf \
+      --prompt="kube context > " \
+      --header="current: ${current_context:-none}" \
+      --height=60% \
+      --layout=reverse \
+      --border
+)"
+
+[[ -n "$context" ]] || exit 0
+
+kubectl config use-context "$context"

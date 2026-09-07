@@ -1,0 +1,200 @@
+#!/usr/bin/env bash
+
+# @name cp
+# @desc Copy file/directory between local and Kubernetes pod
+
+set -euo pipefail
+
+die() {
+  echo "tbx kube cp: $*" >&2
+  exit 1
+}
+
+command -v kubectl >/dev/null 2>&1 || die "kubectl not found"
+command -v fzf >/dev/null 2>&1 || die "fzf not found"
+
+pick_pod_path() {
+  local current="/"
+  local selection
+  local listing
+  local manual
+
+  while true; do
+    # Requires `sh` + `ls` inside the container.
+    # If unavailable, fallback to manual path input.
+    if ! listing="$(
+      kubectl exec \
+        "$pod" \
+        -n "$namespace" \
+        -c "$container" \
+        -- sh -c '
+          cd "$1" 2>/dev/null || exit 2
+
+          printf "%s\n" \
+            "[SELECT THIS DIR]" \
+            "[TYPE PATH MANUALLY]" \
+            "../"
+
+          ls -1A -p
+        ' sh "$current" 2>/dev/null
+    )"; then
+      read -r -p "Pod path: " manual
+
+      [[ -n "$manual" ]] || return 1
+
+      printf '%s\n' "$manual"
+      return 0
+    fi
+
+    selection="$(
+      printf '%s\n' "$listing" |
+        fzf \
+          --prompt="pod:${current} > " \
+          --height=70% \
+          --layout=reverse \
+          --border
+    )"
+
+    [[ -n "$selection" ]] || return 1
+
+    case "$selection" in
+      "[SELECT THIS DIR]")
+        printf '%s\n' "$current"
+        return 0
+        ;;
+
+      "[TYPE PATH MANUALLY]")
+        read -r -p "Pod path: " manual
+
+        [[ -n "$manual" ]] || continue
+
+        printf '%s\n' "$manual"
+        return 0
+        ;;
+
+      "../")
+        if [[ "$current" != "/" ]]; then
+          current="$(dirname "$current")"
+        fi
+        ;;
+
+      */)
+        selection="${selection%/}"
+
+        if [[ "$current" == "/" ]]; then
+          current="/$selection"
+        else
+          current="${current%/}/$selection"
+        fi
+        ;;
+
+      *)
+        if [[ "$current" == "/" ]]; then
+          printf '/%s\n' "$selection"
+        else
+          printf '%s/%s\n' "${current%/}" "$selection"
+        fi
+
+        return 0
+        ;;
+    esac
+  done
+}
+
+direction="$(
+  printf '%s\n' \
+    "local -> pod" \
+    "pod -> local" |
+    fzf \
+      --prompt="direction > " \
+      --height=40% \
+      --layout=reverse \
+      --border
+)"
+
+[[ -n "$direction" ]] || exit 0
+
+namespace="$(
+  kubectl get namespaces \
+    -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' |
+    fzf \
+      --prompt="namespace > " \
+      --height=60% \
+      --layout=reverse \
+      --border
+)"
+
+[[ -n "$namespace" ]] || exit 0
+
+pod="$(
+  kubectl get pods \
+    -n "$namespace" \
+    -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' |
+    fzf \
+      --prompt="pod > " \
+      --height=60% \
+      --layout=reverse \
+      --border
+)"
+
+[[ -n "$pod" ]] || exit 0
+
+containers="$(
+  kubectl get pod "$pod" \
+    -n "$namespace" \
+    -o jsonpath='{.spec.containers[*].name}' |
+    tr ' ' '\n'
+)"
+
+container_count="$(printf '%s\n' "$containers" | grep -c .)"
+
+if [[ "$container_count" -gt 1 ]]; then
+  container="$(
+    printf '%s\n' "$containers" |
+      fzf \
+        --prompt="container > " \
+        --height=40% \
+        --layout=reverse \
+        --border
+  )"
+
+  [[ -n "$container" ]] || exit 0
+else
+  container="$(printf '%s\n' "$containers" | head -n 1)"
+fi
+
+if [[ "$direction" == "local -> pod" ]]; then
+  read -r -p "Local path: " local_path
+  [[ -n "$local_path" ]] || exit 0
+
+  pod_path="$(pick_pod_path)" || exit 0
+
+  kubectl cp \
+    "$local_path" \
+    "${pod}:${pod_path}" \
+    -n "$namespace" \
+    -c "$container"
+
+else
+  pod_path="$(pick_pod_path)" || exit 0
+
+  name="$(basename "${pod_path%/}")"
+
+  if [[ -z "$name" || "$name" == "/" ]]; then
+    name="pod-root"
+  fi
+
+  default_local_path="./$name"
+
+  read -r -p "Local path [$default_local_path]: " local_path
+
+  if [[ -z "$local_path" ]]; then
+    local_path="$default_local_path"
+  fi
+
+  kubectl cp \
+    "${pod}:${pod_path}" \
+    "$local_path" \
+    -n "$namespace" \
+    -c "$container"
+fi

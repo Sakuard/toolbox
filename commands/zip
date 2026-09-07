@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+
+# @name zip
+# @desc Select files/directories and create a zip archive
+
+set -euo pipefail
+
+die() {
+  echo "tbx zip: $*" >&2
+  exit 1
+}
+
+command -v zip >/dev/null 2>&1 || die "zip not found"
+command -v fzf >/dev/null 2>&1 || die "fzf not found"
+
+inputs=()
+
+if [[ $# -gt 0 ]]; then
+  inputs=("$@")
+else
+  while IFS= read -r -d '' item; do
+    inputs+=("$item")
+  done < <(
+    find . -maxdepth 1 -mindepth 1 -print0 |
+      fzf \
+        --read0 \
+        --print0 \
+        --multi \
+        --prompt="zip > " \
+        --height=60% \
+        --layout=reverse \
+        --border
+  )
+fi
+
+[[ ${#inputs[@]} -gt 0 ]] || exit 0
+
+# Default output name
+if [[ ${#inputs[@]} -eq 1 ]]; then
+  input="${inputs[0]%/}"
+  default_output="$(basename "$input").zip"
+else
+  default_output="archive-$(date '+%Y%m%d-%H%M%S').zip"
+fi
+
+read -r -p "Output name [$default_output]: " output
+
+# Empty input → use default
+if [[ -z "$output" ]]; then
+  output="$default_output"
+fi
+
+# Automatically append .zip
+if [[ "$output" != *.zip ]]; then
+  output="${output}.zip"
+fi
+
+[[ ! -e "$output" ]] || die "$output already exists"
+
+zip -r "$output" "${inputs[@]}"
+
+echo "Created: $output"

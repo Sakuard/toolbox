@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+
+# @name unzip
+# @desc Select a zip archive and extract it
+
+set -euo pipefail
+
+die() {
+  echo "tbx unzip: $*" >&2
+  exit 1
+}
+
+command -v unzip >/dev/null 2>&1 || die "unzip not found"
+
+archive="${1:-}"
+
+# 沒帶參數 → fzf 選 zip
+if [[ -z "$archive" ]]; then
+  command -v fzf >/dev/null 2>&1 || die "fzf not found"
+
+  archive="$(
+    find . -type f -name '*.zip' |
+      fzf \
+        --prompt="unzip > " \
+        --height=60% \
+        --layout=reverse \
+        --border
+  )"
+fi
+
+[[ -n "$archive" ]] || exit 0
+[[ -f "$archive" ]] || die "file not found: $archive"
+
+filename="$(basename "$archive")"
+default_output="${filename%.zip}"
+
+read -r -p "Output directory [$default_output]: " output
+
+if [[ -z "$output" ]]; then
+  output="$default_output"
+fi
+
+mkdir -p "$output"
+
+unzip "$archive" -d "$output"
+
+echo "Extracted: $archive -> $output"
