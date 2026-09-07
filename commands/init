@@ -1,0 +1,532 @@
+#!/usr/bin/env bash
+
+# @name init
+# @desc Interactive macOS development environment setup
+
+set -eo pipefail
+
+die() {
+  echo "tbx init: $*" >&2
+  exit 1
+}
+
+# =============================================================================
+# Homebrew
+# =============================================================================
+
+setup_brew() {
+  if command -v brew >/dev/null 2>&1; then
+    echo "✅ Homebrew"
+    return
+  fi
+
+  read -r -p "Homebrew 未安裝，是否安裝？[y/N]: " confirm
+
+  case "$confirm" in
+    y|Y)
+      /bin/bash -c "$(
+        curl -fsSL \
+          https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh
+      )"
+      ;;
+    *)
+      die "Homebrew required"
+      ;;
+  esac
+
+  if [[ -x /opt/homebrew/bin/brew ]]; then
+    eval "$(/opt/homebrew/bin/brew shellenv)"
+
+    if ! grep -q 'brew shellenv' "$HOME/.zprofile" 2>/dev/null; then
+      echo 'eval "$(/opt/homebrew/bin/brew shellenv)"' >> "$HOME/.zprofile"
+    fi
+  fi
+}
+
+setup_brew
+
+command -v fzf >/dev/null 2>&1 ||
+  die "fzf required"
+
+# =============================================================================
+# Checklist
+#
+# item:
+#
+#   value|label|default
+#
+# default:
+#
+#   1 = default selected
+#   0 = default unselected
+#
+# NOTE:
+#   default-selected items must be added before optional items.
+# =============================================================================
+
+checklist() {
+  local title="$1"
+  shift
+
+  local items=("$@")
+  local default_count=0
+  local default_bind=""
+  local actions=""
+  local output=""
+  local item
+  local value
+  local label
+  local default
+  local i
+
+  [[ ${#items[@]} -gt 0 ]] || return 0
+
+  for item in "${items[@]}"; do
+    IFS='|' read -r value label default <<< "$item"
+
+    if [[ "$default" == "1" ]]; then
+      default_count=$((default_count + 1))
+    fi
+  done
+
+  if (( default_count > 0 )); then
+    for ((i=0; i<default_count; i++)); do
+      [[ -n "$actions" ]] && actions+="+"
+
+      actions+="toggle"
+
+      if (( i < default_count - 1 )); then
+        actions+="+down"
+      fi
+    done
+
+    default_bind="load:$actions"
+  fi
+
+  fzf_args=(
+    --multi
+    --delimiter='|'
+    --with-nth=2
+    --prompt="$title  > "
+    --header='↑/↓ move   SPACE select   ENTER confirm   ESC skip'
+    --bind='space:toggle+down'
+    --bind='enter:transform:test "${FZF_SELECT_COUNT:-0}" -eq 0 && echo abort || echo accept'
+    --marker='v '
+    --pointer='› '
+    --height=80%
+    --layout=reverse
+    --border
+    --cycle
+  )
+
+  if [[ -n "$default_bind" ]]; then
+    fzf_args+=(--bind="$default_bind")
+  fi
+
+  output="$(
+    for item in "${items[@]}"; do
+      IFS='|' read -r value label default <<< "$item"
+      printf '%s|%s\n' "$value" "$label"
+    done |
+      fzf "${fzf_args[@]}" |
+      cut -d'|' -f1
+  )" || true
+
+  if [[ -n "$output" ]]; then
+    printf '%s\n' "$output"
+  fi
+}
+
+# =============================================================================
+# Homebrew Formula
+# =============================================================================
+
+formula_items=()
+
+add_formula() {
+  local package="$1"
+  local check_command="$2"
+  local label="$3"
+  local default="$4"
+
+  # Command already usable.
+  if [[ -n "$check_command" ]] &&
+     command -v "$check_command" >/dev/null 2>&1; then
+    return
+  fi
+
+  # Installed through Homebrew even if command lookup is unusual.
+  if brew list --formula "$package" >/dev/null 2>&1; then
+    return
+  fi
+
+  formula_items+=("$package|$label|$default")
+}
+
+# -----------------------------------------------------------------------------
+# Default selected
+# -----------------------------------------------------------------------------
+
+add_formula "fzf"       "fzf"       "fzf"        1
+add_formula "helm"      "helm"      "Helm"       1
+add_formula "helmfile"  "helmfile"  "Helmfile"   1
+add_formula "node"      "node"      "Node.js"    1
+
+add_formula \
+  "hashicorp/tap/terraform" \
+  "terraform" \
+  "Terraform" \
+  1
+
+add_formula "terragrunt" "terragrunt" "Terragrunt" 1
+add_formula "tree"       "tree"       "tree"       1
+add_formula "jq"         "jq"         "jq"         1
+add_formula "yq"         "yq"         "yq"         1
+add_formula "k9s"        "k9s"        "k9s"        1
+
+# -----------------------------------------------------------------------------
+# Optional
+# -----------------------------------------------------------------------------
+
+add_formula "awscli"      "aws"    "AWS CLI"     0
+add_formula "docker"      "docker" "Docker CLI"  0
+add_formula "tfenv"       "tfenv"  "tfenv"       0
+add_formula "iproute2mac" "ip"     "iproute2mac" 0
+
+if [[ ${#formula_items[@]} -gt 0 ]]; then
+  selected_formula="$(
+    checklist \
+      "Homebrew Formula" \
+      "${formula_items[@]}"
+  )"
+
+  if [[ -n "$selected_formula" ]]; then
+    packages=()
+
+    while IFS= read -r package; do
+      [[ -n "$package" ]] || continue
+      packages+=("$package")
+    done <<< "$selected_formula"
+
+    if [[ ${#packages[@]} -gt 0 ]]; then
+      echo
+      echo "Installing Formula:"
+      printf '  - %s\n' "${packages[@]}"
+      echo
+
+      brew install "${packages[@]}"
+    fi
+  fi
+else
+  echo "✅ Formula 全部已安裝"
+fi
+
+# =============================================================================
+# Homebrew Cask
+# =============================================================================
+
+cask_items=()
+
+add_cask() {
+  local package="$1"
+  local check_command="$2"
+  local app_path="$3"
+  local label="$4"
+  local default="$5"
+
+  # Command already available.
+  if [[ -n "$check_command" ]] &&
+     command -v "$check_command" >/dev/null 2>&1; then
+    return
+  fi
+
+  # App already exists.
+  if [[ -n "$app_path" && -e "$app_path" ]]; then
+    return
+  fi
+
+  # Installed through Homebrew.
+  if brew list --cask "$package" >/dev/null 2>&1; then
+    return
+  fi
+
+  cask_items+=("$package|$label|$default")
+}
+
+# -----------------------------------------------------------------------------
+# Default selected
+# -----------------------------------------------------------------------------
+
+add_cask \
+  "raycast" \
+  "" \
+  "/Applications/Raycast.app" \
+  "Raycast" \
+  1
+
+add_cask \
+  "orbstack" \
+  "" \
+  "/Applications/OrbStack.app" \
+  "OrbStack" \
+  1
+
+add_cask \
+  "gcloud-cli" \
+  "gcloud" \
+  "" \
+  "Google Cloud CLI" \
+  1
+
+add_cask \
+  "telegram" \
+  "" \
+  "/Applications/Telegram.app" \
+  "Telegram" \
+  1
+
+# -----------------------------------------------------------------------------
+# Optional
+# -----------------------------------------------------------------------------
+
+add_cask \
+  "aws-vault" \
+  "aws-vault" \
+  "" \
+  "AWS Vault" \
+  0
+
+add_cask \
+  "cursor" \
+  "cursor" \
+  "/Applications/Cursor.app" \
+  "Cursor" \
+  0
+
+add_cask \
+  "claude-code" \
+  "claude" \
+  "" \
+  "Claude Code" \
+  0
+
+if [[ ${#cask_items[@]} -gt 0 ]]; then
+  selected_cask="$(
+    checklist \
+      "Homebrew Cask" \
+      "${cask_items[@]}"
+  )"
+
+  if [[ -n "$selected_cask" ]]; then
+    packages=()
+
+    while IFS= read -r package; do
+      [[ -n "$package" ]] || continue
+      packages+=("$package")
+    done <<< "$selected_cask"
+
+    if [[ ${#packages[@]} -gt 0 ]]; then
+      echo
+      echo "Installing Cask:"
+      printf '  - %s\n' "${packages[@]}"
+      echo
+
+      brew install --cask "${packages[@]}"
+    fi
+  fi
+else
+  echo "✅ Cask 全部已安裝"
+fi
+
+# =============================================================================
+# GKE auth plugin
+# =============================================================================
+
+if ! command -v gke-gcloud-auth-plugin >/dev/null 2>&1; then
+  selected="$(
+    checklist \
+      "Google Cloud / GKE" \
+      "gke-gcloud-auth-plugin|GKE kubectl auth plugin|0"
+  )"
+
+  if [[ "$selected" == "gke-gcloud-auth-plugin" ]]; then
+    if command -v gcloud >/dev/null 2>&1; then
+      gcloud components install gke-gcloud-auth-plugin
+    else
+      echo "⚠️ gcloud 尚未安裝，跳過 GKE auth plugin"
+    fi
+  fi
+else
+  echo "✅ GKE auth plugin"
+fi
+
+# =============================================================================
+# Oh My Zsh
+#
+# Missing -> show, default selected.
+# Installed -> don't show.
+# =============================================================================
+
+if [[ ! -d "$HOME/.oh-my-zsh" ]]; then
+  selected="$(
+    checklist \
+      "Shell Setup" \
+      "oh-my-zsh|Oh My Zsh|1"
+  )"
+
+  if [[ "$selected" == "oh-my-zsh" ]]; then
+    sh -c "$(
+      curl -fsSL \
+        https://raw.github.com/ohmyzsh/ohmyzsh/master/tools/install.sh
+    )"
+  fi
+else
+  echo "✅ Oh My Zsh"
+fi
+
+# =============================================================================
+# Terminal Prompt Config
+#
+# Only ask when tbx has NOT configured it.
+#
+# Empty input:
+#   -> do nothing
+#   -> do not write marker
+#
+# Non-empty:
+#   -> enable config
+# =============================================================================
+
+PROMPT_MARKER="# tbx custom prompt"
+
+if ! grep -q "^${PROMPT_MARKER}$" "$HOME/.zshrc" 2>/dev/null; then
+  echo
+
+  read -r -p \
+    "Terminal prompt 顯示名稱（直接 Enter = 不設定）: " \
+    username
+
+  if [[ -n "$username" ]]; then
+    custom_prompt="PROMPT='%{%F{green}%}➜%{%F{yellow}%} ${username} %{%f%}%{%F{cyan}%}%c%{%f%} \$(git_prompt_info)'"
+
+    {
+      echo
+      echo "$PROMPT_MARKER"
+      echo "$custom_prompt"
+    } >> "$HOME/.zshrc"
+
+    echo "✅ Terminal prompt configured"
+  fi
+else
+  echo "✅ Terminal prompt 已設定"
+fi
+
+# =============================================================================
+# Custom Functions
+# =============================================================================
+
+install_list_profiles() {
+  cat >> "$HOME/.zshrc" <<'EOF'
+
+# _list_profiles
+_list_profiles() {
+  compadd $(aws-vault list --profiles | tr "\n" " ")
+}
+
+compdef _list_profiles aws-vault exec
+compdef _list_profiles aws-login
+EOF
+
+  echo "✅ Installed: _list_profiles"
+}
+
+install_aws_whoami() {
+  cat >> "$HOME/.zshrc" <<'EOF'
+
+# aws-whoami
+aws-whoami() {
+  aws sts get-caller-identity \
+    --output json \
+    --no-cli-pager
+}
+EOF
+
+  echo "✅ Installed: aws-whoami"
+}
+
+install_aws_login() {
+  cat >> "$HOME/.zshrc" <<'EOF'
+
+# aws-login
+aws-login() {
+  local duration=${2:-8h}
+
+  aws-vault login \
+    -s \
+    --duration="$duration" \
+    "$1" |
+  xargs \
+    /Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome \
+    --args \
+    --lang="en" \
+    --no-first-run \
+    --new-window \
+    --disk-cache="$HOME/.aws/console" \
+    --user-data-dir="$HOME/.aws/console" \
+    --profile-directory="$1"
+}
+EOF
+
+  echo "✅ Installed: aws-login"
+}
+
+function_items=()
+
+if ! grep -q '^# _list_profiles$' "$HOME/.zshrc" 2>/dev/null; then
+  function_items+=(
+    "_list_profiles|AWS Vault profile completion|0"
+  )
+fi
+
+if ! grep -q '^# aws-whoami$' "$HOME/.zshrc" 2>/dev/null; then
+  function_items+=(
+    "aws-whoami|aws-whoami|0"
+  )
+fi
+
+if ! grep -q '^# aws-login$' "$HOME/.zshrc" 2>/dev/null; then
+  function_items+=(
+    "aws-login|aws-login|0"
+  )
+fi
+
+if [[ ${#function_items[@]} -gt 0 ]]; then
+  selected_functions="$(
+    checklist \
+      "Custom Functions" \
+      "${function_items[@]}"
+  )"
+
+  while IFS= read -r fn; do
+    [[ -n "$fn" ]] || continue
+
+    case "$fn" in
+      _list_profiles)
+        install_list_profiles
+        ;;
+
+      aws-whoami)
+        install_aws_whoami
+        ;;
+
+      aws-login)
+        install_aws_login
+        ;;
+    esac
+  done <<< "$selected_functions"
+else
+  echo "✅ Custom functions 全部已設定"
+fi
+
+echo
+echo "✅ tbx init completed"

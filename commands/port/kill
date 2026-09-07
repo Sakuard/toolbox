@@ -1,0 +1,131 @@
+#!/usr/bin/env bash
+
+# @name kill
+# @desc Select a user-owned listening port/process and kill it
+
+set -euo pipefail
+
+die() {
+  echo "tbx port kill: $*" >&2
+  exit 1
+}
+
+command -v lsof >/dev/null 2>&1 || die "lsof not found"
+command -v fzf >/dev/null 2>&1 || die "fzf not found"
+command -v ps >/dev/null 2>&1 || die "ps not found"
+
+current_user="$(id -un)"
+
+is_system_process() {
+  local executable="$1"
+
+  case "$executable" in
+    /System/*)
+      return 0
+      ;;
+    /usr/libexec/*)
+      return 0
+      ;;
+    /usr/sbin/*)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+rows="$(
+  lsof \
+    -nP \
+    -a \
+    -u "$current_user" \
+    -iTCP \
+    -sTCP:LISTEN \
+    2>/dev/null |
+  awk '
+    NR > 1 {
+      address = $(NF - 1)
+      port = address
+      sub(/^.*:/, "", port)
+
+      key = $2 ":" port
+
+      if (!seen[key]++) {
+        printf "%s\t%s\t%s\t%s\n", $1, $2, $3, port
+      }
+    }
+  '
+)"
+
+safe_rows=""
+
+while IFS=$'\t' read -r command_name pid user port; do
+  [[ -n "$pid" ]] || continue
+
+  executable="$(
+    ps -p "$pid" -o comm= 2>/dev/null |
+      sed 's/^[[:space:]]*//'
+  )"
+
+  [[ -n "$executable" ]] || continue
+
+  # Hide macOS/system processes.
+  if is_system_process "$executable"; then
+    continue
+  fi
+
+  safe_rows+="$command_name"$'\t'
+  safe_rows+="$pid"$'\t'
+  safe_rows+="$user"$'\t'
+  safe_rows+="$port"$'\t'
+  safe_rows+="$executable"$'\n'
+
+done <<< "$rows"
+
+[[ -n "$safe_rows" ]] || {
+  echo "No killable listening ports found"
+  exit 0
+}
+
+selection="$(
+  {
+    printf "COMMAND\tPID\tUSER\tPORT\tEXECUTABLE\n"
+    printf '%s' "$safe_rows"
+  } |
+    column -t -s $'\t' |
+    fzf \
+      --header-lines=1 \
+      --prompt="port kill > " \
+      --height=70% \
+      --layout=reverse \
+      --border
+)"
+
+[[ -n "$selection" ]] || exit 0
+
+command_name="$(printf '%s\n' "$selection" | awk '{print $1}')"
+pid="$(printf '%s\n' "$selection" | awk '{print $2}')"
+port="$(printf '%s\n' "$selection" | awk '{print $4}')"
+
+# Process may have exited since fzf opened.
+kill -0 "$pid" 2>/dev/null ||
+  die "process $pid no longer exists"
+
+echo
+echo "Process: $command_name"
+echo "PID:     $pid"
+echo "Port:    $port"
+echo
+
+read -r -p "Kill this process? [y/N]: " confirm
+
+case "$confirm" in
+  y|Y)
+    kill -TERM "$pid"
+    echo "Killed PID $pid (port $port)"
+    ;;
+  *)
+    exit 0
+    ;;
+esac

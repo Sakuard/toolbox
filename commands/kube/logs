@@ -1,0 +1,104 @@
+#!/usr/bin/env bash
+
+# @name logs
+# @desc Select pod and view logs
+
+set -euo pipefail
+
+die() {
+  echo "tbx kube logs: $*" >&2
+  exit 1
+}
+
+command -v kubectl >/dev/null 2>&1 || die "kubectl not found"
+command -v fzf >/dev/null 2>&1 || die "fzf not found"
+
+namespace="$(
+  kubectl get namespaces \
+    -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' |
+    fzf \
+      --prompt="namespace > " \
+      --height=60% \
+      --layout=reverse \
+      --border
+)"
+
+[[ -n "$namespace" ]] || exit 0
+
+pod="$(
+  kubectl get pods \
+    -n "$namespace" \
+    --no-headers |
+    fzf \
+      --prompt="pod > " \
+      --height=60% \
+      --layout=reverse \
+      --border |
+    awk '{print $1}'
+)"
+
+[[ -n "$pod" ]] || exit 0
+
+containers="$(
+  kubectl get pod "$pod" \
+    -n "$namespace" \
+    -o jsonpath='{.spec.containers[*].name}' |
+    tr ' ' '\n'
+)"
+
+container_count="$(printf '%s\n' "$containers" | grep -c .)"
+
+if [[ "$container_count" -gt 1 ]]; then
+  container="$(
+    printf '%s\n' "$containers" |
+      fzf \
+        --prompt="container > " \
+        --height=40% \
+        --layout=reverse \
+        --border
+  )"
+
+  [[ -n "$container" ]] || exit 0
+else
+  container="$(printf '%s\n' "$containers" | head -n 1)"
+fi
+
+mode="$(
+  printf '%s\n' \
+    "follow - last 200 lines" \
+    "last 200 lines" \
+    "all logs" |
+    fzf \
+      --prompt="logs > " \
+      --height=40% \
+      --layout=reverse \
+      --border
+)"
+
+[[ -n "$mode" ]] || exit 0
+
+case "$mode" in
+  "follow - last 200 lines")
+    exec kubectl logs \
+      -n "$namespace" \
+      "$pod" \
+      -c "$container" \
+      --tail=200 \
+      -f
+    ;;
+
+  "last 200 lines")
+    exec kubectl logs \
+      -n "$namespace" \
+      "$pod" \
+      -c "$container" \
+      --tail=200
+    ;;
+
+  "all logs")
+    exec kubectl logs \
+      -n "$namespace" \
+      "$pod" \
+      -c "$container"
+    ;;
+esac
