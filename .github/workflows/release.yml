@@ -1,0 +1,59 @@
+name: Release
+on:
+  pull_request:
+    branches: [main]
+    types: [closed]
+permissions:
+  contents: read
+concurrency:
+  group: release-${{ github.event.pull_request.head.ref }}
+  cancel-in-progress: false
+jobs:
+  verify:
+    if: github.event.pull_request.merged == true && github.event.pull_request.head.repo.full_name == github.repository && startsWith(github.event.pull_request.head.ref, 'v')
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+      - env:
+          TAG: ${{ github.event.pull_request.head.ref }}
+        run: bash scripts/package.sh "$TAG"
+  release:
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+          fetch-depth: 0
+      - name: Validate and package
+        env:
+          TAG: ${{ github.event.pull_request.head.ref }}
+        run: bash scripts/package.sh "$TAG"
+      - name: Tag merge commit and publish (safe to rerun)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.pull_request.head.ref }}
+        run: |
+          if git rev-parse --verify "refs/tags/$TAG" >/dev/null 2>&1; then
+            test "$(git rev-parse "$TAG^{commit}")" = "$(git rev-parse HEAD)" || {
+              echo 'Tag already points to a different commit' >&2
+              exit 1
+            }
+          else
+            git tag "$TAG"
+            git push origin "refs/tags/$TAG"
+          fi
+          if gh release view "$TAG" --json isDraft > release.json; then
+            if jq -e '.isDraft == false' release.json; then
+              echo 'Release already published; preserving its assets.'
+              exit 0
+            fi
+          else
+            gh release create "$TAG" --verify-tag --draft --title "$TAG" --generate-notes
+          fi
+          gh release upload "$TAG" "dist/toolbox-${TAG#v}.tar.gz" dist/SHA256SUMS --clobber
+          gh release edit "$TAG" --draft=false

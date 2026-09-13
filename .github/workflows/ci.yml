@@ -1,0 +1,35 @@
+name: CI
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  package:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Check and package
+        env:
+          BRANCH: ${{ github.head_ref || github.ref_name }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          bash scripts/check.sh
+          if [[ "$BRANCH" == v* ]]; then
+            bash scripts/package.sh "$BRANCH"
+            if [[ "$EVENT" == pull_request ]] && git show-ref --verify --quiet "refs/tags/$BRANCH"; then
+              echo 'Version tag already exists; choose a new version branch.' >&2
+              exit 1
+            fi
+          else
+            bash scripts/package.sh v0.0.0
+          fi
+  browse:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: brew install jq yq
+      - run: python3 -m unittest discover -s tests -v

@@ -112,6 +112,20 @@ while [[ -e "$output" ]]; do
   fi
 done
 
-zip -r "$output" "${inputs[@]}" -x '*/.env' -x '*/tests/*' -x '*/node_modules/*' -x '*/dist/*' -x '*/.git/*' -x '*/.credential/*' -x '*/.state/*' -x '*/err_logs/*' -x '*/.venv/*'
+excludes=(
+  '*/.env' '*/tests/*' '*/node_modules/*' '*/dist/*' '*/.git/*'
+  '*/.credential/*' '*/.state/*' '*/err_logs/*' '*/.venv/*'
+  # macOS metadata
+  '*/.DS_Store' '*/._*' '*/__MACOSX/*'
+  # Xcode build products and user-specific settings
+  '*/build/*' '*/DerivedData/*' '*.xcarchive/*' '*.xcresult/*'
+  '*.ipa' '*.dSYM/*' '*.dSYM.zip'
+  '*/xcuserdata/*' '*.xcuserstate' '*.xcscmblueprint'
+  '*.pbxuser' '*.mode1v3' '*.mode2v3' '*.perspectivev3' '*.moved-aside/*'
+  # Swift Package Manager, CocoaPods, and Carthage caches
+  '*/.build/*' '*/.swiftpm/*' '*/Pods/*' '*/Carthage/Build/*'
+)
+
+zip -r "$output" "${inputs[@]}" -x "${excludes[@]}"
 
 echo "Created: $output"
