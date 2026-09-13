@@ -18,19 +18,59 @@ inputs=()
 if [[ $# -gt 0 ]]; then
   inputs=("$@")
 else
-  while IFS= read -r -d '' item; do
-    inputs+=("$item")
-  done < <(
-    find . -maxdepth 1 -mindepth 1 -print0 |
-      fzf \
-        --read0 \
-        --print0 \
-        --multi \
-        --prompt="zip > " \
-        --height=60% \
-        --layout=reverse \
-        --border
-  )
+  current_dir="."
+  action_file="$(mktemp "${TMPDIR:-/tmp}/tbx-zip-action.XXXXXX")"
+  trap 'rm -f "$action_file"' EXIT
+
+  while :; do
+    : > "$action_file"
+    inputs=()
+    separator=$'\t'
+    enter_binding="enter:transform:if [[ \${FZF_SELECT_COUNT:-0} -gt 0 ]]; then echo accept; else current_item=\"\${FZF_CURRENT_ITEM#*${separator}}\"; if [[ -d \"\$current_item\" ]]; then printf '%s\\0' \"\$current_item\" > '$action_file'; echo abort; else echo accept; fi; fi"
+
+    while IFS= read -r -d '' item; do
+      inputs+=("$item")
+    done < <(
+      {
+        if [[ "$current_dir" != "." ]]; then
+          parent_dir="$(dirname "$current_dir")"
+          printf '%s%s%s\0' '[DIR] ..' "$separator" "$parent_dir"
+        fi
+
+        while IFS= read -r -d '' item; do
+          if [[ -d "$item" ]]; then
+            label="[DIR]  $(basename "$item")"
+          else
+            label="[FILE] $(basename "$item")"
+          fi
+
+          printf '%s%s%s\0' "$label" "$separator" "$item"
+        done < <(find "$current_dir" -maxdepth 1 -mindepth 1 -print0)
+      } |
+        fzf \
+          --read0 \
+          --print0 \
+          --multi \
+          --delimiter="$separator" \
+          --with-nth=1 \
+          --accept-nth=2 \
+          --prompt="zip [$current_dir] > " \
+          --header='↑/↓ move   SPACE select   ENTER open/confirm   ESC cancel' \
+          --bind='space:toggle' \
+          --bind="$enter_binding" \
+          --height=60% \
+          --layout=reverse \
+          --border
+    )
+
+    next_dir=""
+    if IFS= read -r -d '' next_dir < "$action_file"; then
+      current_dir="$next_dir"
+      continue
+    fi
+
+    break
+  done
 fi
 
 [[ ${#inputs[@]} -gt 0 ]] || exit 0
@@ -55,8 +95,37 @@ if [[ "$output" != *.zip ]]; then
   output="${output}.zip"
 fi
 
-[[ ! -e "$output" ]] || die "$output already exists"
+while [[ -e "$output" ]]; do
+  [[ -f "$output" ]] || die "$output exists and is not a regular file"
 
-zip -r "$output" "${inputs[@]}"
+  read -r -p "$output already exists. Press Enter to overwrite, or enter a new name: " replacement
+
+  if [[ -z "$replacement" ]]; then
+    rm -f -- "$output"
+    break
+  fi
+
+  output="$replacement"
+
+  if [[ "$output" != *.zip ]]; then
+    output="${output}.zip"
+  fi
+done
+
+excludes=(
+  '*/.env' '*/tests/*' '*/node_modules/*' '*/dist/*' '*/.git/*'
+  '*/.credential/*' '*/.state/*' '*/err_logs/*' '*/.venv/*'
+  # macOS metadata
+  '*/.DS_Store' '*/._*' '*/__MACOSX/*'
+  # Xcode build products and user-specific settings
+  '*/build/*' '*/DerivedData/*' '*.xcarchive/*' '*.xcresult/*'
+  '*.ipa' '*.dSYM/*' '*.dSYM.zip'
+  '*/xcuserdata/*' '*.xcuserstate' '*.xcscmblueprint'
+  '*.pbxuser' '*.mode1v3' '*.mode2v3' '*.perspectivev3' '*.moved-aside/*'
+  # Swift Package Manager, CocoaPods, and Carthage caches
+  '*/.build/*' '*/.swiftpm/*' '*/Pods/*' '*/Carthage/Build/*'
+)
+
+zip -r "$output" "${inputs[@]}" -x "${excludes[@]}"
 
 echo "Created: $output"

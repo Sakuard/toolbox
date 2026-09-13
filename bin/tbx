@@ -17,6 +17,15 @@ SCRIPT_DIR="$(cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 COMMANDS_DIR="$ROOT_DIR/commands"
 
+if [[ "${1:-}" == "--version" || "${1:-}" == "-v" ]]; then
+  version="dev"
+  if [[ -f "$ROOT_DIR/VERSION" ]]; then
+    version="$(cat "$ROOT_DIR/VERSION")"
+  fi
+  printf 'tbx %s\n' "$version"
+  exit 0
+fi
+
 die() {
   echo "tbx: $*" >&2
   exit 1
